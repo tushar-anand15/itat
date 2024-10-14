@@ -1,10 +1,10 @@
 # Ignore the data directory
 data/
 
-# Byte-compiled / optimized / DLL files
+# Byte-compiled / optimized / DLL files/ log files
 __pycache__/
 *.py[cod]
 *$py.class
-
+*.log
 # csv files
 *.csv

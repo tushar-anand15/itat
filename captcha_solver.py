@@ -3,7 +3,7 @@ import numpy as np
 import pytesseract
 
 def solve_captcha(image_data):
-    print("--- [*] captcha service ---")
+    #print("--- [*] captcha service ---")
     image_array = np.frombuffer(image_data.getvalue(), dtype=np.uint8)
     image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
 

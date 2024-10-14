@@ -14,9 +14,17 @@ import itertools
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+import logging
 
 # Suppress only the InsecureRequestWarning from urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Configure logging
+logging.basicConfig(
+    filename='itat_scraper.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 class ITATScraper:
     def __init__(self, start_date, end_date):
@@ -74,9 +82,14 @@ class ITATScraper:
             'sec-ch-ua-platform': '"Android"',
         }
         url = "https://itat.gov.in/judicial/tribunalorders"
-        response = session.get(url, headers=headers, verify=False, timeout=60*60*60)
-        if response.status_code == 200:
-            return session.cookies.get_dict()
+        try:
+            response = session.get(url, headers=headers, verify=False, timeout=60)
+            if response.status_code == 200:
+                return session.cookies.get_dict()
+        except requests.exceptions.Timeout:
+            logging.error("Request timed out while fetching CSRF token.")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"An error occurred: {e}")
 
     def get_captcha(self, cookies):
         headers = {
@@ -95,28 +108,35 @@ class ITATScraper:
             'sec-ch-ua-platform': '"Android"',
         }
         while True:
-            response = requests.post('https://itat.gov.in/judicial/get_captcha_tribu2', cookies=cookies, headers=headers, verify=False, timeout=60*60*60)
-            match = re.search(r'src="([^"]+)"', response.text)
-            if match:
-                image_url = match.group(1)
-                image_response = requests.get(image_url, cookies=cookies, headers=headers)
-                image_data = BytesIO(image_response.content)
-                captcha_value = solve_captcha(image_data)
-                validation_response = requests.get(f'https://itat.gov.in/judicial/check_captcha_js_tribu2/{captcha_value}', headers=headers, cookies=cookies)
-                if validation_response.json().get('success') is True:
-                    return captcha_value
-            else:
-                print("Failed to extract image URL, please try again.")
+            try:
+                response = requests.post('https://itat.gov.in/judicial/get_captcha_tribu2', cookies=cookies, headers=headers, verify=False, timeout=60)
+                match = re.search(r'src="([^"]+)"', response.text)
+                if match:
+                    image_url = match.group(1)
+                    image_response = requests.get(image_url, cookies=cookies, headers=headers)
+                    image_data = BytesIO(image_response.content)
+                    captcha_value = solve_captcha(image_data)
+                    validation_response = requests.get(f'https://itat.gov.in/judicial/check_captcha_js_tribu2/{captcha_value}', headers=headers, cookies=cookies)
+                    if validation_response.json().get('success') is True:
+                        return captcha_value
+                else:
+                    logging.warning("Failed to extract image URL, retrying.")
+            except requests.exceptions.Timeout:
+                logging.error("Request timed out while fetching captcha.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"An error occurred: {e}")
 
     def format_date(self, input_date):
         if isinstance(input_date, str):
             try:
                 date_obj = datetime.strptime(input_date, '%Y-%m-%d')
             except ValueError:
-                raise ValueError("Input date string must be in 'YYYY-MM-DD' format")
+                logging.error("Input date string must be in 'YYYY-MM-DD' format")
+                raise
         elif isinstance(input_date, datetime):
             date_obj = input_date
         else:
+            logging.error("Input must be a string in 'YYYY-MM-DD' format or a datetime object")
             raise TypeError("Input must be a string in 'YYYY-MM-DD' format or a datetime object")
         return date_obj.strftime('%d-%b-%Y')
 
@@ -150,13 +170,18 @@ class ITATScraper:
             'userCaptcha2': captcha,
             'btnSubmit2': 'Submit2',
         }
-        response = requests.post('https://itat.gov.in/judicial/casestatus', headers=headers, data=data, cookies=_cookies, verify=False, timeout=60*60*60)
-        case_soup = [BeautifulSoup(response.content, 'html.parser')]
-        btn_pages = case_soup[0].findAll('form', {'id':'enclosureform'})[-1].findAll('input',{'name':'btnPage'})[1:]
-        if btn_pages:
-            new_cases = self.process_subsequent_requests(case_soup[0], _cookies)
-            case_soup.extend(new_cases)
-        return case_soup
+        try:
+            response = requests.post('https://itat.gov.in/judicial/casestatus', headers=headers, data=data, cookies=_cookies, verify=False, timeout=60)
+            case_soup = [BeautifulSoup(response.content, 'html.parser')]
+            btn_pages = case_soup[0].findAll('form', {'id':'enclosureform'})[-1].findAll('input',{'name':'btnPage'})[1:]
+            if btn_pages:
+                new_cases = self.process_subsequent_requests(case_soup[0], _cookies)
+                case_soup.extend(new_cases)
+            return case_soup
+        except requests.exceptions.Timeout:
+            logging.error(f"Request timed out while fetching tribunal orders for {bench}, {case_type}, {date}.")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"An error occurred: {e}")
 
     def process_subsequent_requests(self, case_soup, _cookies):
         headers = {
@@ -189,14 +214,19 @@ class ITATScraper:
         list_reqs = []
         for btn_page in btn_pages:
             req_dict = {'csrf_test_name': csrf_test_name, 'lq':lq_value, 'lqc': lqc_value, 'btnPage': btn_page['value']}
-            response = requests.post('https://itat.gov.in/judicial/casestatus', headers=headers, data=req_dict, cookies=_cookies, verify=False, timeout=60*60*60)
-            list_reqs.append(BeautifulSoup(response.content,'html.parser'))
+            try:
+                response = requests.post('https://itat.gov.in/judicial/casestatus', headers=headers, data=req_dict, cookies=_cookies, verify=False, timeout=60)
+                list_reqs.append(BeautifulSoup(response.content,'html.parser'))
+            except requests.exceptions.Timeout:
+                logging.error(f"Request timed out while processing subsequent requests for page {btn_page['value']}.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"An error occurred: {e}")
         return list_reqs
 
     def process_cases(self, soup):
         table = soup.find('table', {'class': 'searchtble table table-striped table-hover'})
         if table is None:
-            print("Not Applicable / Data Table Not Found")
+            logging.warning("Not Applicable / Data Table Not Found")
             return {}
         data = []
         for row in table.find('tbody').find_all('tr'):
@@ -260,90 +290,104 @@ class ITATScraper:
             'csrf_test_name': __cookies['csrf_cookie_name'],
             'btnDetail': CASE_ID,
         }
-        response = requests.post('https://itat.gov.in/judicial/judicialdetail', cookies=__cookies, headers=headers, data=data)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        case_details = []
-        case_details_table = soup.find_all('table', {'class': 'table table-striped table-bordered manage-efects'})
-        if case_details_table:
-            case_details_table = case_details_table[0]
-            rows = case_details_table.find_all('tr')
-            current_case_detail = {}
-            for row in rows:
-                cols = row.find_all('td')
-                for col in cols:
-                    label = col.get('data-label')
-                    text = col.get_text(strip=True).replace('\n', ' ').replace('  ', ' ')
-                    if label in ['Appeal Number', 'Filed On', 'Assessment Year', 'Bench Allotted', 'Case Status']:
-                        current_case_detail[label] = text
-                    elif label == 'Appellant' or label == 'Respondent':
-                        if 'Appellant' in current_case_detail:
-                            current_case_detail['Respondent'] = text
-                        else:
-                            current_case_detail['Appellant'] = text
-                if len(current_case_detail) >= 5:
-                    case_details.append(current_case_detail)
-                    current_case_detail = {}
-        tabs_content_div = soup.find('div', class_='tabs-content')
-        short_summary = {}
-        tribunal_orders = []
-        daily_orders = []
-        if tabs_content_div:
-            short_summary_section = tabs_content_div.find_all('section')[0]
-            if short_summary_section:
-                summary_table = short_summary_section.find('table')
-                if summary_table:
-                    rows = summary_table.find_all('tr')
-                    if rows:
-                        cols = rows[0].find_all('td')
-                        if len(cols) >= 4:
-                            short_summary = {
-                                "Date of Last Hearing": cols[0].get_text(strip=True),
-                                "Date of Next Hearing": cols[1].get_text(strip=True)
-                            }
-                        elif len(cols) == 2:
-                            short_summary = {
-                                "Date of Last Hearing": cols[0].get_text(strip=True),
-                                "Date of Next Hearing": cols[1].get_text(strip=True)
-                            }
-            tribunal_orders_section = tabs_content_div.find_all('section')[1]
-            if tribunal_orders_section:
-                orders_table = tribunal_orders_section.find('table')
-                if orders_table:
-                    rows = orders_table.find_all('tr')
-                    for row in rows[1:]:
-                        cols = row.find_all('td')
-                        if len(cols) >= 6:
-                            tribunal_orders.append({
-                                "Order Type": cols[0].get_text(strip=True),
-                                "Date of Order": cols[1].get_text(strip=True),
-                                "Pronounced On": cols[2].get_text(strip=True),
-                                "Result": cols[3].get_text(strip=True),
-                                "Order Link": cols[4].find('a')['href'] if cols[4].find('a') else None,
-                                "Status / Remarks": cols[5].get_text(strip=True)
-                            })
-            daily_orders_section = tribunal_orders_section.find('dl', class_='accordion1')
-            if daily_orders_section:
-                accordion_items = daily_orders_section.find_all('dt')
-                for item in accordion_items:
-                    date = item.find('a').get_text(strip=True)
-                    content = item.find_next('dd').get_text(" ", strip=True).replace('\n', ' ').replace('  ', ' ')
-                    daily_orders.append({
-                        "Date": date,
-                        "Content": content
-                    })
-        data = {
-            "Case Details": case_details,
-            "Short Summary": short_summary,
-            "Tribunal Orders": tribunal_orders,
-            "Daily Orders": daily_orders
-        }
-        return json.dumps(data, indent=4)
+        try:
+            response = requests.post('https://itat.gov.in/judicial/judicialdetail', cookies=__cookies, headers=headers, data=data)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            case_details = []
+            case_details_table = soup.find_all('table', {'class': 'table table-striped table-bordered manage-efects'})
+            if case_details_table:
+                case_details_table = case_details_table[0]
+                rows = case_details_table.find_all('tr')
+                current_case_detail = {}
+                for row in rows:
+                    cols = row.find_all('td')
+                    for col in cols:
+                        label = col.get('data-label')
+                        text = col.get_text(strip=True).replace('\n', ' ').replace('  ', ' ')
+                        if label in ['Appeal Number', 'Filed On', 'Assessment Year', 'Bench Allotted', 'Case Status']:
+                            current_case_detail[label] = text
+                        elif label == 'Appellant' or label == 'Respondent':
+                            if 'Appellant' in current_case_detail:
+                                current_case_detail['Respondent'] = text
+                            else:
+                                current_case_detail['Appellant'] = text
+                    if len(current_case_detail) >= 5:
+                        case_details.append(current_case_detail)
+                        current_case_detail = {}
+            tabs_content_div = soup.find('div', class_='tabs-content')
+            short_summary = {}
+            tribunal_orders = []
+            daily_orders = []
+            if tabs_content_div:
+                short_summary_section = tabs_content_div.find_all('section')[0]
+                if short_summary_section:
+                    summary_table = short_summary_section.find('table')
+                    if summary_table:
+                        rows = summary_table.find_all('tr')
+                        if rows:
+                            cols = rows[0].find_all('td')
+                            if len(cols) >= 4:
+                                short_summary = {
+                                    "Date of Last Hearing": cols[0].get_text(strip=True),
+                                    "Date of Next Hearing": cols[1].get_text(strip=True)
+                                }
+                            elif len(cols) == 2:
+                                short_summary = {
+                                    "Date of Last Hearing": cols[0].get_text(strip=True),
+                                    "Date of Next Hearing": cols[1].get_text(strip=True)
+                                }
+                tribunal_orders_section = tabs_content_div.find_all('section')[1]
+                if tribunal_orders_section:
+                    orders_table = tribunal_orders_section.find('table')
+                    if orders_table:
+                        rows = orders_table.find_all('tr')
+                        for row in rows[1:]:
+                            cols = row.find_all('td')
+                            if len(cols) >= 6:
+                                tribunal_orders.append({
+                                    "Order Type": cols[0].get_text(strip=True),
+                                    "Date of Order": cols[1].get_text(strip=True),
+                                    "Pronounced On": cols[2].get_text(strip=True),
+                                    "Result": cols[3].get_text(strip=True),
+                                    "Order Link": cols[4].find('a')['href'] if cols[4].find('a') else None,
+                                    "Status / Remarks": cols[5].get_text(strip=True)
+                                })
+                daily_orders_section = tribunal_orders_section.find('dl', class_='accordion1')
+                if daily_orders_section:
+                    accordion_items = daily_orders_section.find_all('dt')
+                    for item in accordion_items:
+                        date = item.find('a').get_text(strip=True)
+                        content = item.find_next('dd').get_text(" ", strip=True).replace('\n', ' ').replace('  ', ' ')
+                        daily_orders.append({
+                            "Date": date,
+                            "Content": content
+                        })
+            data = {
+                "Case Details": case_details,
+                "Short Summary": short_summary,
+                "Tribunal Orders": tribunal_orders,
+                "Daily Orders": daily_orders
+            }
+            return json.dumps(data, indent=4)
+        except requests.exceptions.Timeout:
+            logging.error(f"Request timed out while extracting case details for CASE_ID {CASE_ID}.")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"An error occurred: {e}")
 
     def get_bench_data(self, bench, case_type, date):
-        print(f"PROCESSING: ---{bench}, {case_type}, {date}---")
+        logging.info(f"PROCESSING: ---{bench}, {case_type}, {date}---")
         cookie_session = self.csrf()
+        if not cookie_session:
+            logging.error("Failed to retrieve CSRF token.")
+            return []
         captcha = self.get_captcha(cookie_session)
+        if not captcha:
+            logging.error("Failed to solve captcha.")
+            return []
         cases = self.get_tribunal_orders(bench, case_type, date, cookie_session, captcha)
+        if not cases:
+            logging.error(f"Failed to retrieve tribunal orders for {bench}, {case_type}, {date}.")
+            return []
         cases = [self.process_cases(i) for i in cases]
         flattened_cases = [item for sublist in cases for item in sublist]
         for case in flattened_cases:
@@ -354,6 +398,9 @@ class ITATScraper:
                 'case_type': case_type,
             }
             case_d = self.extract_case_extended(cookie_session, case['CASE_ID'])
+            if not case_d:
+                logging.error(f"Failed to extract extended case details for CASE_ID {case['CASE_ID']}.")
+                continue
             dir_path = os.path.join('data', self.job_id, 'json')
             os.makedirs(dir_path, exist_ok=True)
             file_path = os.path.join(dir_path, f"{case['CASE_ID']}.json")
@@ -363,14 +410,19 @@ class ITATScraper:
         return cases
 
     def download_pdf(self, pdf_url, save_path):
-        base_url = f"{pdf_url}"
-        response = requests.get(base_url, stream=True, verify=False)
-        if response.status_code == 200:
-            with open(save_path, "wb") as f:
-                f.write(response.content)
-            return os.path.basename(save_path)
-        else:
-            print(f"Failed to download: {base_url} - Status Code: {response.status_code}")
+        try:
+            response = requests.get(pdf_url, stream=True, verify=False, timeout=60)
+            if response.status_code == 200:
+                with open(save_path, "wb") as f:
+                    f.write(response.content)
+                return os.path.basename(save_path)
+            else:
+                logging.error(f"Failed to download: {pdf_url} - Status Code: {response.status_code}")
+                return None
+        except requests.exceptions.Timeout:
+            logging.error(f"Request timed out while downloading PDF from {pdf_url}.")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"An error occurred: {e}")
             return None
 
     def process_json_file(self, file_path):
@@ -378,7 +430,7 @@ class ITATScraper:
             with open(file_path, "r", encoding="utf-8") as f:
                 case_details = json.load(f)
         except Exception as e:
-            print(f"Error reading JSON file {file_path}: {e}")
+            logging.error(f"Error reading JSON file {file_path}: {e}")
             return [], None
         json_filename = os.path.basename(file_path).replace(".json", "")
         pdf_dir = os.path.join("data", self.job_id, "pdfs", json_filename)
@@ -397,7 +449,7 @@ class ITATScraper:
         return pdf_filenames, pdf_dir
 
     def download_pdfs_from_json(self, json_directory):
-        print("Starting PDF download from JSON files...")
+        logging.info("Starting PDF download from JSON files...")
         json_files = [
             os.path.join(json_directory, f)
             for f in os.listdir(json_directory)
@@ -416,30 +468,28 @@ class ITATScraper:
                     if pdf_filenames:
                         json_identifier = os.path.basename(json_file).replace(".json", "")
                         pdf_paths[json_identifier] = (json_file, pdf_filenames)
-                        print(
-                            f"Downloading PDFs for case - {json_identifier}: {len(pdf_filenames)} files."
-                        )
+                        logging.info(f"Downloaded PDFs for case - {json_identifier}: {len(pdf_filenames)} files.")
                     else:
-                        print(f"No PDFs found for {json_file}.")
+                        logging.warning(f"No PDFs found for {json_file}.")
                 except Exception as e:
-                    print(f"Error processing {json_file}: {e}")
+                    logging.error(f"Error processing {json_file}: {e}")
         return pdf_paths
 
     def append_paths_to_csv(self, csv_file, pdf_paths):
-        print("Appending paths to CSV...")
+        logging.info("Appending paths to CSV...")
         df = pd.read_csv(csv_file)
         df["PDFs"] = ""
         df["CASE_ID"] = df["CASE_ID"]
         for case_id, (json_path, pdf_files) in pdf_paths.items():
             matching_rows = df[df["CASE_ID"] == case_id]
             if matching_rows.empty:
-                print(f"Error: {json_path}")
+                logging.error(f"Error: {json_path}")
                 continue
             row_index = matching_rows.index[0]
             df.at[row_index, "PDFs"] = ", ".join(pdf_files)
         df.drop(columns=["CASE_ID"], inplace=True)
         df.to_csv(csv_file, index=False)
-        print("CSV update completed.")
+        logging.info("CSV update completed.")
 
     def flatten(self, nested_list):
         flattened = []
@@ -460,9 +510,13 @@ class ITATScraper:
                 for bench, case_type in combinations
                 for date in date_range
             }
-            for future in concurrent.futures.as_completed(future_to_bench):
-                data = future.result()
-                all_cases.append(data)
+            for future in tqdm(concurrent.futures.as_completed(future_to_bench), total=len(future_to_bench), desc="Processing"):
+                try:
+                    data = future.result()
+                    if data:
+                        all_cases.append(data)
+                except Exception as e:
+                    logging.error(f"An error occurred during processing: {e}")
         csv_data = self.flatten(all_cases)
         df = pd.DataFrame(csv_data)
         csv_name = f"ITAT_{self.start_date.strftime('%Y-%m-%d')}_{self.job_id}_ALL_DATA.csv"
@@ -470,7 +524,7 @@ class ITATScraper:
         json_directory = os.path.join("data", self.job_id, "json")
         pdf_paths = self.download_pdfs_from_json(json_directory)
         self.append_paths_to_csv(csv_name, pdf_paths)
-        print("COMPLETE")
+        logging.info("COMPLETE")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process ITAT data.")

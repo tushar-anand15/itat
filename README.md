@@ -35,7 +35,7 @@ This project is a web scraper designed to extract data from the Income Tax Appel
    pip install -r requirements.txt
    ```
 
-   Ensure you have a `requirements.txt` file with the necessary dependencies listed.
+ 
 
 ## Usage
 

@@ -5,3 +5,6 @@ data/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# csv files
+*.csv

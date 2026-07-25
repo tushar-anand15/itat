@@ -25,7 +25,7 @@ This project is a web scraper designed to extract data from the Income Tax Appel
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/yourusername/itat-scraper.git
+   git clone https://github.com/tushar-anand15/itat.git
    cd itat-scraper
    ```
 
@@ -40,9 +40,9 @@ This project is a web scraper designed to extract data from the Income Tax Appel
 ## Usage
 
 Run the script with the desired start and end dates:
-'''bash
+```bash
 python main.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-'''
+```
 
 
 ## Configuration
@@ -56,4 +56,3 @@ python main.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD
 - `data/`: Directory for storing JSON and PDF files (ignored by Git).
 - `.gitignore`: Specifies files and directories to be ignored by Git.
 - `README.md`: Project documentation.
-
